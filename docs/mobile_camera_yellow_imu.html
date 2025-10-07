@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>Mobile Yellow Detector + IMU (9 values)</title>
+  <style>
+    :root{--bg:#0b1020;--card:#0f1724;--accent:#ffd54f}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    body{background:linear-gradient(180deg,#051022 0%, #071427 60%);color:#e6eef8;display:flex;align-items:center;justify-content:center;padding:12px}
+    .app{width:100%;max-width:980px;background:var(--card);border-radius:12px;padding:12px;box-shadow:0 8px 30px rgba(2,6,23,.6)}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;margin-top:8px}
+    button{background:var(--accent);border:0;padding:10px 12px;border-radius:8px;font-weight:600}
+    .row{display:flex;gap:12px;margin-top:12px}
+    .video-wrap{flex:1;min-width:220px}
+    canvas{width:100%;height:auto;border-radius:8px;background:#000}
+    .panel{width:320px;padding:8px;background:rgba(255,255,255,0.02);border-radius:8px;overflow:auto}
+    .values{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .val{background:rgba(255,255,255,0.02);padding:8px;border-radius:6px}
+    .small{font-size:12px;color:#9fb0d7}
+    .legend{display:flex;gap:6px;align-items:center;margin-top:8px}
+    .dot{width:14px;height:14px;border-radius:50%;background:var(--accent)}
+    footer{font-size:12px;color:#9fb0d7;margin-top:8px}
+    @media(max-width:820px){.row{flex-direction:column}.panel{width:100%}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Yellow object detector + IMU (9 values)</h1>
+  </header>
+
+  <div class="controls">
+    <button id="startBtn">Start camera & sensors</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <div style="margin-left:auto" class="small">Works on modern mobile browsers (HTTPS required)</div>
+  </div>
+
+  <div class="row">
+    <div class="video-wrap">
+      <video id="video" autoplay playsinline style="display:none"></video>
+      <canvas id="canvas" width="640" height="480"></canvas>
+      <div class="legend"><div class="dot"></div><div class="small">Yellow detection overlay</div></div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin:0 0 8px 0">IMU — 9 values</h3>
+      <div class="values">
+        <div class="val"><div class="small">accel x</div><div id="ax">—</div></div>
+        <div class="val"><div class="small">accel y</div><div id="ay">—</div></div>
+        <div class="val"><div class="small">accel z</div><div id="az">—</div></div>
+
+        <div class="val"><div class="small">gyro x (deg/s)</div><div id="gx">—</div></div>
+        <div class="val"><div class="small">gyro y (deg/s)</div><div id="gy">—</div></div>
+        <div class="val"><div class="small">gyro z (deg/s)</div><div id="gz">—</div></div>
+
+        <div class="val"><div class="small">mag x (µT)</div><div id="mx">—</div></div>
+        <div class="val"><div class="small">mag y (µT)</div><div id="my">—</div></div>
+        <div class="val"><div class="small">mag z (µT)</div><div id="mz">—</div></div>
+      </div>
+
+      <hr style="opacity:.08;margin:10px 0">
+      <div class="small">Detected object info:</div>
+      <div id="detInfo" style="margin-top:6px">No detection</div>
+
+      <footer>
+        Notes: On iOS you may need to grant motion & orientation access manually. Magnetometer or the Generic Sensor API may be unavailable in some browsers.
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script>
+(async function(){
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  const axEl = document.getElementById('ax');
+  const ayEl = document.getElementById('ay');
+  const azEl = document.getElementById('az');
+  const gxEl = document.getElementById('gx');
+  const gyEl = document.getElementById('gy');
+  const gzEl = document.getElementById('gz');
+  const mxEl = document.getElementById('mx');
+  const myEl = document.getElementById('my');
+  const mzEl = document.getElementById('mz');
+  const detInfo = document.getElementById('detInfo');
+
+  let stream=null, rafId=null;
+  let sensors = {acc:null, gyro:null, mag:null};
+  let fallbackMotion = false;
+
+  function format(v){return (v===null||v===undefined)?'—':(Number(v).toFixed(3));}
+
+  async function requestSensorPermissions(){
+    // iOS: DeviceMotionEvent.requestPermission
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+      try{
+        const r = await DeviceMotionEvent.requestPermission();
+        // iOS returns 'granted' or 'denied'
+        if (r !== 'granted') console.warn('DeviceMotion permission not granted:', r);
+      }catch(e){console.warn(e)}
+    }
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+      try{ await DeviceOrientationEvent.requestPermission(); }catch(e){/*ignore*/}
+    }
+  }
+
+  async function start(){
+    startBtn.disabled = true;
+    await requestSensorPermissions();
+
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+      video.srcObject = stream;
+      await video.play();
+      // resize canvas to video aspect
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+    }catch(e){
+      alert('Camera permission or camera error: '+e);
+      startBtn.disabled = false; return;
+    }
+
+    // Try Generic Sensor API first
+    try{
+      if ('Accelerometer' in window){
+        sensors.acc = new Accelerometer({frequency:60});
+        sensors.acc.addEventListener('reading', ()=>{
+          axEl.textContent = format(sensors.acc.x);
+          ayEl.textContent = format(sensors.acc.y);
+          azEl.textContent = format(sensors.acc.z);
+        });
+        sensors.acc.start();
+      }
+      if ('Gyroscope' in window){
+        sensors.gyro = new Gyroscope({frequency:60});
+        sensors.gyro.addEventListener('reading', ()=>{
+          gxEl.textContent = format(sensors.gyro.x);
+          gyEl.textContent = format(sensors.gyro.y);
+          gzEl.textContent = format(sensors.gyro.z);
+        });
+        sensors.gyro.start();
+      }
+      if ('Magnetometer' in window){
+        sensors.mag = new Magnetometer({frequency:30});
+        sensors.mag.addEventListener('reading', ()=>{
+          mxEl.textContent = format(sensors.mag.x);
+          myEl.textContent = format(sensors.mag.y);
+          mzEl.textContent = format(sensors.mag.z);
+        });
+        sensors.mag.start();
+      }
+    }catch(e){
+      console.warn('Generic Sensor API not available or blocked', e);
+    }
+
+    // Fallback to DeviceMotion if Generic Sensor API wasn't available for accel/gyro
+    if (!sensors.acc || !sensors.gyro){
+      if ('DeviceMotionEvent' in window){
+        fallbackMotion = true;
+        window.addEventListener('devicemotion', (ev)=>{
+          const a = ev.acceleration || ev.accelerationIncludingGravity;
+          if (a){ axEl.textContent = format(a.x); ayEl.textContent = format(a.y); azEl.textContent = format(a.z); }
+          if (ev.rotationRate){ gxEl.textContent = format(ev.rotationRate.alpha); gyEl.textContent = format(ev.rotationRate.beta); gzEl.textContent = format(ev.rotationRate.gamma); }
+        });
+      }
+      // DeviceOrientationEvent sometimes provides compass-like values (not raw magnetometer) - optional
+      if ('DeviceOrientationEvent' in window){
+        window.addEventListener('deviceorientation', (ev)=>{
+          // alpha,beta,gamma - heading and tilt
+          // Not used directly for magnetometer fields but fill if magnetometer missing
+          if (!sensors.mag){ mxEl.textContent = format(ev.alpha); myEl.textContent = format(ev.beta); mzEl.textContent = format(ev.gamma); }
+        });
+      }
+    }
+
+    stopBtn.disabled = false;
+    runLoop();
+  }
+
+  function stop(){
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (stream){
+      stream.getTracks().forEach(t=>t.stop()); stream=null; video.srcObject=null;
+    }
+    // stop sensors
+    for (const k of Object.keys(sensors)){
+      const s = sensors[k];
+      try{ if (s && s.stop) s.stop(); }catch(e){}
+      sensors[k]=null;
+    }
+    // remove devicemotion listeners (can't remove anonymous easily; reload page to fully clear if needed)
+  }
+
+  function rgbToHsv(r,g,b){
+    // r,g,b in [0,255]
+    r/=255; g/=255; b/=255;
+    const max = Math.max(r,g,b), min = Math.min(r,g,b);
+    const d = max - min;
+    let h=0, s = max===0?0:d/max, v=max;
+    if (d!==0){
+      switch(max){
+        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+        case g: h = (b - r) / d + 2; break;
+        case b: h = (r - g) / d + 4; break;
+      }
+      h = h * 60;
+    }
+    return [h, s, v];
+  }
+
+  function detectYellow(imageData){
+    const w = imageData.width, h = imageData.height;
+    const data = imageData.data;
+    let minX=w, minY=h, maxX=0, maxY=0, cnt=0;
+    // simple downsample step to reduce CPU on mobile
+    const step = 2; // check every 2nd pixel horizontally and vertically
+    for (let y=0;y<h;y+=step){
+      for (let x=0;x<w;x+=step){
+        const i = (y*w + x)*4;
+        const r = data[i], g = data[i+1], b = data[i+2];
+        const [H,S,V] = rgbToHsv(r,g,b);
+        // Yellow roughly H in [30,70] (degrees), S>0.35, V>0.35
+        if (H >= 25 && H <= 80 && S > 0.35 && V > 0.35){
+          cnt++;
+          if (x<minX) minX=x; if (y<minY) minY=y; if (x>maxX) maxX=x; if (y>maxY) maxY=y;
+        }
+      }
+    }
+    if (cnt < 20) return null; // too small
+    return {minX,minY,maxX,maxY,cnt};
+  }
+
+  function runLoop(){
+    if (!video || video.readyState < 2) { rafId = requestAnimationFrame(runLoop); return; }
+    const w = canvas.width, h = canvas.height;
+    ctx.drawImage(video,0,0,w,h);
+    const img = ctx.getImageData(0,0,w,h);
+    const res = detectYellow(img);
+    if (res){
+      // draw bounding box/overlay
+      ctx.strokeStyle = 'rgba(255,213,79,0.95)'; ctx.lineWidth = Math.max(2, Math.round(Math.min(w,h)/200));
+      ctx.beginPath(); ctx.moveTo(res.minX, res.minY); ctx.lineTo(res.maxX, res.minY); ctx.lineTo(res.maxX, res.maxY); ctx.lineTo(res.minX, res.maxY); ctx.closePath(); ctx.stroke();
+      // center
+      const cx = Math.round((res.minX + res.maxX)/2), cy = Math.round((res.minY + res.maxY)/2);
+      ctx.fillStyle = 'rgba(255,213,79,0.7)'; ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI*2); ctx.fill();
+      detInfo.textContent = `Yellow area: ${res.cnt} px-samples; bbox: (${res.minX},${res.minY})–(${res.maxX},${res.maxY}) center (${cx},${cy})`;
+    }else{
+      detInfo.textContent = 'No yellow object detected';
+    }
+    rafId = requestAnimationFrame(runLoop);
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
+
+  // Extra: try to detect if magnetometer readings are still empty and show hint
+  setInterval(()=>{
+    // If magnetometer blank for long, show hint
+    if (mxEl.textContent === '—' && myEl.textContent === '—' && mzEl.textContent === '—'){
+      // no-op; we don't want to spam. User sees footer hint.
+    }
+  },3000);
+
+})();
+</script>
+</body>
+</html>
