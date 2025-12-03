@@ -148,30 +148,7 @@
       console.warn('Generic Sensor API not available or blocked', e);
     }
 
-    // Fallback to DeviceMotion/DeviceOrientation if Generic Sensor API failed
-    if (!sensors.acc || !sensors.gyro){
-      if ('DeviceMotionEvent' in window){
-        window.addEventListener('devicemotion', (ev)=>{
-          const a = ev.acceleration || ev.accelerationIncludingGravity;
-          if (a){
-            updateImuDisplay('ax', a.x); updateImuDisplay('ay', a.y); updateImuDisplay('az', a.z);
-          }
-          if (ev.rotationRate){
-            updateImuDisplay('gx', ev.rotationRate.alpha); updateImuDisplay('gy', ev.rotationRate.beta); updateImuDisplay('gz', ev.rotationRate.gamma);
-          }
-          recordCurrentData(); // Record on fallback event frequency
-        });
-      }
-    }
-
-    if (!sensors.mag){
-      if ('DeviceOrientationEvent' in window){
-        window.addEventListener('deviceorientation', (ev)=>{
-          // Using orientation for mag fallback (less accurate but better than nothing)
-          updateImuDisplay('mx', ev.alpha); updateImuDisplay('my', ev.beta); updateImuDisplay('mz', ev.gamma);
-        });
-      }
-    }
+    
     
     // Check if any sensor started
     if (sensors.acc || sensors.gyro || sensors.mag || 'DeviceMotionEvent' in window) {
