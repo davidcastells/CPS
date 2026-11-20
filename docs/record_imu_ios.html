@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>IMU Recorder (9 values)</title>
+  <style>
+    :root{--bg:#0b1020;--card:#0f1724;--accent:#ffd54f}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    body{background:linear-gradient(180deg,#051022 0%, #071427 60%);color:#e6eef8;display:flex;align-items:center;justify-content:center;padding:12px}
+    .app{width:100%;max-width:400px;background:var(--card);border-radius:12px;padding:12px;box-shadow:0 8px 30px rgba(2,6,23,.6)}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;justify-content:center;}
+    button{background:var(--accent);border:0;padding:10px 12px;border-radius:8px;font-weight:600;cursor:pointer;color:#051022;}
+    button:disabled{opacity:0.5;cursor:not-allowed;}
+    .panel{padding:8px;background:rgba(255,255,255,0.02);border-radius:8px;margin-top:12px;}
+    .values{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .val{background:rgba(255,255,255,0.02);padding:8px;border-radius:6px;min-width:120px;}
+    .small{font-size:12px;color:#9fb0d7}
+    footer{font-size:12px;color:#9fb0d7;margin-top:8px}
+    .record-status{padding:10px;background:rgba(255,255,255,0.05);border-radius:8px;font-size:14px;margin-top:10px;text-align:center;}
+    .recording{color:#ff5252;font-weight:bold;}
+    @media(max-width:820px){.row{flex-direction:column}.panel{width:100%}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>IMU Recorder (9 values)</h1>
+  </header>
+
+  <div class="controls">
+    <button id="startBtn">Start Sensors</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="recordBtn" disabled>Start Recording</button>
+    <button id="copyCsvBtn" disabled>Copy CSV to Clipboard</button>
+  </div>
+
+  <div id="recordStatus" class="record-status">Recording Status: Not started.</div>
+
+  <div class="panel">
+    <h3 style="margin:0 0 8px 0">IMU — Live Values</h3>
+    <div class="values">
+      <div class="val"><div class="small">accel x (m/s²)</div><div id="ax">—</div></div>
+      <div class="val"><div class="small">accel y (m/s²)</div><div id="ay">—</div></div>
+      <div class="val"><div class="small">accel z (m/s²)</div><div id="az">—</div></div>
+
+      <div class="val"><div class="small">gyro x (deg/s)</div><div id="gx">—</div></div>
+      <div class="val"><div class="small">gyro y (deg/s)</div><div id="gy">—</div></div>
+      <div class="val"><div class="small">gyro z (deg/s)</div><div id="gz">—</div></div>
+
+      <div class="val"><div class="small">mag x (µT)</div><div id="mx">—</div></div>
+      <div class="val"><div class="small">mag y (µT)</div><div id="my">—</div></div>
+      <div class="val"><div class="small">mag z (µT)</div><div id="mz">—</div></div>
+    </div>
+
+    <footer>
+      Notes: Requires HTTPS. iOS uses DeviceMotion/Orientation; raw 3-axis magnetometer (µT) is not exposed in iOS Safari.
+    </footer>
+  </div>
+</div>
+
+<script>
+(async function(){
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const recordBtn = document.getElementById('recordBtn');
+  const copyCsvBtn = document.getElementById('copyCsvBtn');
+  const recordStatusEl = document.getElementById('recordStatus');
+
+  let sensors = { acc: null, gyro: null, mag: null };
+  let usingDeviceMotionFallback = false;
+  let currentImu = { ax: null, ay: null, az: null, gx: null, gy: null, gz: null, mx: null, my: null, mz: null };
+  let isRecording = false;
+  let recordedData = [];
+  let startTime = null;
+
+  function format(v) {
+    return (v === null || v === undefined || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(3);
+  }
+
+  function updateImuDisplay(key, val) {
+    currentImu[key] = (val === undefined || Number.isNaN(Number(val))) ? null : val;
+    const el = document.getElementById(key);
+    if (el) el.textContent = format(currentImu[key]);
+  }
+
+  // Must be triggered from a user gesture (like clicking Start Sensors) on iOS
+  async function requestSensorPermissions() {
+    let motionGranted = true;
+
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const res = await DeviceMotionEvent.requestPermission();
+        motionGranted = (res === 'granted');
+      } catch (e) {
+        console.warn('DeviceMotion permission error:', e);
+        motionGranted = false;
+      }
+    }
+
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        await DeviceOrientationEvent.requestPermission();
+      } catch (e) {
+        console.warn('DeviceOrientation permission error:', e);
+      }
+    }
+
+    return motionGranted;
+  }
+
+  function handleDeviceMotion(event) {
+    // Prefer accelerationIncludingGravity; fall back to acceleration if needed
+    const acc = event.accelerationIncludingGravity || event.acceleration;
+    if (acc) {
+      updateImuDisplay('ax', acc.x);
+      updateImuDisplay('ay', acc.y);
+      updateImuDisplay('az', acc.z);
+    }
+
+    // rotationRate on iOS is in deg/s (beta ~ x, gamma ~ y, alpha ~ z)
+    const rot = event.rotationRate;
+    if (rot) {
+      updateImuDisplay('gx', rot.beta);
+      updateImuDisplay('gy', rot.gamma);
+      updateImuDisplay('gz', rot.alpha);
+    }
+
+    recordCurrentData();
+  }
+
+  function handleDeviceOrientation(event) {
+    // iOS Safari does not expose raw 3-axis mag (µT); webkitCompassHeading is degrees if available
+    if (typeof event.webkitCompassHeading === 'number' && !Number.isNaN(event.webkitCompassHeading)) {
+      // Optional: if you only want raw 3-axis mag, leave mx/my/mz as null
+    }
+  }
+
+  async function startSensors() {
+    startBtn.disabled = true;
+
+    if (!window.isSecureContext) {
+      alert('Sensors require a secure context (HTTPS or localhost).');
+      startBtn.disabled = false;
+      return;
+    }
+
+    const permissionOk = await requestSensorPermissions();
+
+    // 1. Try Generic Sensor API (Android Chrome / supported browsers)
+    try {
+      if ('Accelerometer' in window) {
+        sensors.acc = new Accelerometer({ frequency: 60 });
+        sensors.acc.addEventListener('reading', () => {
+          updateImuDisplay('ax', sensors.acc.x);
+          updateImuDisplay('ay', sensors.acc.y);
+          updateImuDisplay('az', sensors.acc.z);
+          recordCurrentData();
+        });
+        sensors.acc.start();
+      }
+
+      if ('Gyroscope' in window) {
+        sensors.gyro = new Gyroscope({ frequency: 60 });
+        sensors.gyro.addEventListener('reading', () => {
+          updateImuDisplay('gx', sensors.gyro.x);
+          updateImuDisplay('gy', sensors.gyro.y);
+          updateImuDisplay('gz', sensors.gyro.z);
+        });
+        sensors.gyro.start();
+      }
+
+      if ('Magnetometer' in window) {
+        sensors.mag = new Magnetometer({ frequency: 30 });
+        sensors.mag.addEventListener('reading', () => {
+          updateImuDisplay('mx', sensors.mag.x);
+          updateImuDisplay('my', sensors.mag.y);
+          updateImuDisplay('mz', sensors.mag.z);
+        });
+        sensors.mag.start();
+      }
+    } catch (e) {
+      console.warn('Generic Sensor API not available or blocked:', e);
+    }
+
+    const hasGenericSensors = Boolean(sensors.acc || sensors.gyro || sensors.mag);
+
+    // 2. Fallback to DeviceMotionEvent / DeviceOrientationEvent (iOS Safari)
+    if (!hasGenericSensors && 'DeviceMotionEvent' in window) {
+      if (!permissionOk) {
+        alert('Motion sensor permission was denied. Enable Motion & Orientation Access in Safari/iOS settings and try again.');
+        startBtn.disabled = false;
+        return;
+      }
+      window.addEventListener('devicemotion', handleDeviceMotion);
+      if ('DeviceOrientationEvent' in window) {
+        window.addEventListener('deviceorientation', handleDeviceOrientation);
+      }
+      usingDeviceMotionFallback = true;
+    }
+
+    if (hasGenericSensors || usingDeviceMotionFallback) {
+      stopBtn.disabled = false;
+      recordBtn.disabled = false;
+      recordStatusEl.textContent = usingDeviceMotionFallback
+        ? 'Sensors running (iOS DeviceMotion). Ready to record.'
+        : 'Sensors running. Ready to record.';
+    } else {
+      alert('Could not start any sensors. Please check browser support and permissions (requires HTTPS).');
+      startBtn.disabled = false;
+    }
+  }
+
+  function stopSensors() {
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    recordBtn.disabled = true;
+
+    toggleRecording(false);
+
+    for (const k of Object.keys(sensors)) {
+      const s = sensors[k];
+      try { if (s && s.stop) s.stop(); } catch (e) {}
+      sensors[k] = null;
+    }
+
+    if (usingDeviceMotionFallback) {
+      window.removeEventListener('devicemotion', handleDeviceMotion);
+      window.removeEventListener('deviceorientation', handleDeviceOrientation);
+      usingDeviceMotionFallback = false;
+    }
+
+    recordStatusEl.textContent = 'Sensors stopped.';
+  }
+
+  function recordCurrentData() {
+    if (isRecording && startTime !== null) {
+      const timestamp = Date.now() - startTime;
+      recordedData.push({
+        timestamp: timestamp,
+        ...currentImu
+      });
+      recordStatusEl.innerHTML = `<span class="recording">Recording...</span> ${recordedData.length} samples collected.`;
+    }
+  }
+
+  function toggleRecording(forceState = !isRecording) {
+    isRecording = forceState;
+    recordBtn.textContent = isRecording ? 'Stop Recording' : 'Start Recording';
+    if (isRecording) {
+      startTime = Date.now();
+      recordedData = [];
+      recordStatusEl.innerHTML = `<span class="recording">Recording...</span> ${recordedData.length} samples.`;
+      copyCsvBtn.disabled = true;
+    } else {
+      recordStatusEl.textContent = `Recording stopped. ${recordedData.length} samples collected.`;
+      copyCsvBtn.disabled = recordedData.length === 0;
+    }
+  }
+
+  function copyCsvToClipboard() {
+    if (recordedData.length === 0) {
+      alert('No data to copy. Start recording first.');
+      return;
+    }
+
+    const header = ['timestamp_ms', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'mag_x', 'mag_y', 'mag_z'];
+    const csv = [header.join(',')];
+
+    recordedData.forEach(row => {
+      const values = [
+        row.timestamp,
+        row.ax, row.ay, row.az,
+        row.gx, row.gy, row.gz,
+        row.mx, row.my, row.mz
+      ];
+      csv.push(values.map(v => (v === null || v === undefined || v === '—') ? '' : Number(v).toFixed(6)).join(','));
+    });
+
+    const csvString = csv.join('\n');
+
+    navigator.clipboard.writeText(csvString).then(() => {
+      alert(`Copied ${recordedData.length} IMU samples to clipboard!`);
+      recordStatusEl.textContent = `Copied ${recordedData.length} samples.`;
+    }).catch(err => {
+      console.error('Could not copy text: ', err);
+      alert('Failed to copy data to clipboard. See console for error.');
+    });
+  }
+
+  startBtn.addEventListener('click', startSensors);
+  stopBtn.addEventListener('click', stopSensors);
+  recordBtn.addEventListener('click', () => toggleRecording());
+  copyCsvBtn.addEventListener('click', copyCsvToClipboard);
+})();
+</script>
+</body>
+</html>
